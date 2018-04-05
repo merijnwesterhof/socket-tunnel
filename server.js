@@ -7,6 +7,8 @@ module.exports = function(options) {
 
     // association between subdomains and socket.io sockets
     var socketsByName = {};
+    // association between subdomains and streams
+    var streamsByName = {};
 
     // bounce incoming http requests to socket.io
     var server = http.createServer(function (req, res) {
@@ -48,6 +50,7 @@ module.exports = function(options) {
             client.emit('incomingClient', requestGUID);
 
             ss(client).once(requestGUID, function (stream) {
+            	streamsByName[clientId] = stream;
                 stream.on('error', function () {
                     req.destroy();
                     stream.destroy();
@@ -89,6 +92,90 @@ module.exports = function(options) {
                 });
             });
         }
+    });
+    server.on('upgrade', (req, socket, head) => {
+        // without a hostname, we won't know who the request is for
+        var hostname = req.headers.host;
+    	// console.log('server upgrade event. hostname',hostname);
+        if (!hostname) {
+        	console.log('Error: no hostname');
+        }
+
+        // make sure we received a subdomain
+        var subdomain = tldjs.getSubdomain(hostname);
+        if (!subdomain) {
+        	console.log('Error: no subdomain');
+        }
+
+        // tldjs library return subdomain as all subdomain path from the main domain.
+        // Example:
+        // 1. super.example.com = super
+        // 2. my.super.example.com = my.super
+        // If want to run tunnel server on subdomain, then must use option serverSubdomainHost
+        // and correctly trim returned subdomain by tldjs
+        if (options['subdomain']) {
+            subdomain = subdomain.replace('.' + options['subdomain'], '');
+        }
+
+        var clientId = subdomain.toLowerCase();
+        var client = socketsByName[clientId];
+
+        // no such subdomain
+        if (!client) {
+        	console.log('Error: no client');
+        } 
+        else if(!streamsByName[clientId]){
+        	console.log('Error: no stream');
+        }
+        else {
+        	var stream = streamsByName[clientId]; // use the same stream created earlier
+        	console.log('server upgrade event with clientId:',clientId);
+
+        	// For normal requests this code was implemented like above. Is this needed for upgrade-events as well?
+            // // Pipe all data from tunnel stream to requesting connection
+            // stream.pipe(req.connection);
+            // stream.pipe(req.connection, { end: false });
+
+        	// from https://github.com/localtunnel/server/blob/master/lib/ClientManager.js starting on line 161, adapted for use through SocketTunnel
+            if (!socket.readable || !socket.writable) {
+        		console.log('Error: socket not readable or writable');
+                socket.end();
+                return;
+            }
+
+        	// console.log('server upgrade req:',req,'and socket:',socket,'and head:',head);
+            const arr = [`${req.method} ${req.url} HTTP/${req.httpVersion}`];
+            for (let i=0 ; i < (req.rawHeaders.length-1) ; i+=2) {
+                arr.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i+1]}`);
+            }
+
+            arr.push('');
+            arr.push('');
+            var message = arr.join('\r\n');
+
+            stream.write(message);
+        	console.log('Message sent');
+
+            return;
+        }
+        // from https://github.com/localtunnel/server/blob/master/server.js starting on line 132
+        // if (!hostname) {
+        //     sock.destroy();
+        //     return;
+        // }
+
+        // const clientId = GetClientIdFromHostname(hostname);
+        // if (!clientId) {
+        //     sock.destroy();
+        //     return;
+        // }
+
+        // if (manager.hasClient(clientId)) {
+        //     manager.handleUpgrade(clientId, req, socket);
+        //     return;
+        // }
+
+        socket.destroy();
     });
 
     // socket.io instance
